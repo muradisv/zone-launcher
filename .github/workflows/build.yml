@@ -1,0 +1,614 @@
+name: Build Zone Launcher
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Create project files
+        run: |
+          mkdir -p app/src/main/java/com/zone/launcher
+          cat > settings.gradle <<'ZL_EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "ZoneLauncher"
+          include ':app'
+          ZL_EOF
+          cat > build.gradle <<'ZL_EOF'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+          }
+          ZL_EOF
+          cat > gradle.properties <<'ZL_EOF'
+          org.gradle.jvmargs=-Xmx2048m
+          android.nonTransitiveRClass=true
+          ZL_EOF
+          cat > app/build.gradle <<'ZL_EOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.zone.launcher'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId 'com.zone.launcher'
+                  minSdk 21
+                  targetSdk 33
+                  versionCode 1
+                  versionName '1.0'
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_1_8
+                  targetCompatibility JavaVersion.VERSION_1_8
+              }
+          }
+          ZL_EOF
+          cat > app/src/main/AndroidManifest.xml <<'ZL_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+              <uses-feature android:name="android.software.leanback" android:required="false" />
+
+              <queries>
+                  <intent>
+                      <action android:name="android.intent.action.MAIN" />
+                      <category android:name="android.intent.category.LAUNCHER" />
+                  </intent>
+                  <intent>
+                      <action android:name="android.intent.action.MAIN" />
+                      <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+                  </intent>
+              </queries>
+
+              <application
+                  android:allowBackup="false"
+                  android:label="Zone Launcher"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTask"
+                      android:stateNotNeeded="true"
+                      android:screenOrientation="landscape"
+                      android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenSize|uiMode|locale|layoutDirection|density">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.HOME" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                          <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          ZL_EOF
+          cat > app/src/main/java/com/zone/launcher/MainActivity.java <<'ZL_EOF'
+          package com.zone.launcher;
+
+          import android.app.Activity;
+          import android.app.AlertDialog;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.content.pm.PackageManager;
+          import android.content.pm.ResolveInfo;
+          import android.graphics.drawable.Drawable;
+          import android.graphics.drawable.GradientDrawable;
+          import android.graphics.drawable.StateListDrawable;
+          import android.media.tv.TvContract;
+          import android.media.tv.TvInputInfo;
+          import android.media.tv.TvInputManager;
+          import android.os.Bundle;
+          import android.text.TextUtils;
+          import android.util.TypedValue;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.widget.BaseAdapter;
+          import android.widget.FrameLayout;
+          import android.widget.GridView;
+          import android.widget.ImageView;
+          import android.widget.LinearLayout;
+          import android.widget.TextClock;
+          import android.widget.TextView;
+          import android.widget.Toast;
+
+          import java.util.ArrayList;
+          import java.util.Collections;
+          import java.util.HashSet;
+          import java.util.List;
+          import java.util.Locale;
+          import java.util.Set;
+
+          public class MainActivity extends Activity {
+
+              private static final String[] KEYS = {"zona", "youtube", "twitch"};
+              private static final String[] TITLES = {"Зона", "YouTube", "Twitch"};
+              private static final String[][] PKGS = {
+                      {},
+                      {"com.google.android.youtube.tv", "com.google.android.youtube"},
+                      {"tv.twitch.android.app"}
+              };
+              private static final String[][] WORDS = {
+                      {"зона", "zona"},
+                      {"youtube"},
+                      {"twitch"}
+              };
+
+              static class App {
+                  String pkg;
+                  String cls;
+                  String label;
+                  ResolveInfo ri;
+                  Drawable icon;
+              }
+
+              private PackageManager pm;
+              private SharedPreferences prefs;
+              private FrameLayout root;
+              private FrameLayout overlay;
+              private LinearLayout main;
+              private GridView grid;
+              private TextView gridTitle;
+              private BaseAdapter adapter;
+              private int assignIdx = -1;
+              private final ImageView[] icons = new ImageView[3];
+              private final TextView[] hints = new TextView[3];
+              private final View[] tiles = new View[3];
+              private final List<App> apps = new ArrayList<>();
+
+              @Override
+              protected void onCreate(Bundle state) {
+                  super.onCreate(state);
+                  pm = getPackageManager();
+                  prefs = getSharedPreferences("zl", MODE_PRIVATE);
+
+                  root = new FrameLayout(this);
+                  root.setBackgroundColor(0xFF0B0D12);
+                  root.setClipChildren(false);
+
+                  main = new LinearLayout(this);
+                  main.setOrientation(LinearLayout.VERTICAL);
+                  main.setGravity(Gravity.CENTER);
+                  main.setClipChildren(false);
+                  root.addView(main, new FrameLayout.LayoutParams(-1, -1));
+
+                  LinearLayout row = new LinearLayout(this);
+                  row.setClipChildren(false);
+                  for (int i = 0; i < 3; i++) {
+                      LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(u(15.5), u(15.5));
+                      lp.setMargins(u(1.0), 0, u(1.0), 0);
+                      row.addView(makeTile(i), lp);
+                  }
+                  main.addView(row, new LinearLayout.LayoutParams(-2, -2));
+
+                  LinearLayout row2 = new LinearLayout(this);
+                  row2.setClipChildren(false);
+                  LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(-2, -2);
+                  rp.topMargin = u(3);
+                  main.addView(row2, rp);
+                  row2.addView(makeButton("Все приложения", v -> showGrid(-1)), buttonParams());
+                  row2.addView(makeButton("HDMI", v -> openHdmi()), buttonParams());
+
+                  LinearLayout top = new LinearLayout(this);
+                  top.setOrientation(LinearLayout.VERTICAL);
+                  top.setGravity(Gravity.END);
+                  TextClock clock = new TextClock(this);
+                  clock.setFormat24Hour("HH:mm");
+                  clock.setFormat12Hour("HH:mm");
+                  clock.setTextColor(0xFFE8EAF0);
+                  clock.setTextSize(TypedValue.COMPLEX_UNIT_PX, u(2.6));
+                  top.addView(clock);
+                  TextClock date = new TextClock(this);
+                  date.setFormat24Hour("EEEE, d MMMM");
+                  date.setFormat12Hour("EEEE, d MMMM");
+                  date.setTextColor(0xFF8A93A8);
+                  date.setTextSize(TypedValue.COMPLEX_UNIT_PX, u(1.2));
+                  top.addView(date);
+                  FrameLayout.LayoutParams tp = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.END);
+                  tp.setMargins(0, u(2), u(3), 0);
+                  root.addView(top, tp);
+
+                  TextView footer = text("Удерживайте OK на плитке, чтобы выбрать другое приложение", 1.0, 0xFF5B6479);
+                  FrameLayout.LayoutParams fp = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+                  fp.bottomMargin = u(2);
+                  root.addView(footer, fp);
+
+                  setContentView(root);
+              }
+
+              @Override
+              protected void onResume() {
+                  super.onResume();
+                  loadApps();
+                  refreshTiles();
+                  if (getCurrentFocus() == null && main.getVisibility() == View.VISIBLE) {
+                      tiles[0].requestFocus();
+                  }
+              }
+
+              @Override
+              protected void onNewIntent(Intent intent) {
+                  super.onNewIntent(intent);
+                  hideGrid();
+              }
+
+              @Override
+              public void onBackPressed() {
+                  // Мы главный экран: «Назад» закрывает только список приложений.
+                  hideGrid();
+              }
+
+              // ---------- размеры и стили ----------
+
+              private int u(double pct) {
+                  int w = getResources().getDisplayMetrics().widthPixels;
+                  return Math.max(1, (int) (w * pct / 100.0));
+              }
+
+              private TextView text(String s, double pct, int color) {
+                  TextView t = new TextView(this);
+                  t.setText(s);
+                  t.setTextColor(color);
+                  t.setTextSize(TypedValue.COMPLEX_UNIT_PX, u(pct));
+                  return t;
+              }
+
+              private GradientDrawable shape(int fill, int stroke) {
+                  GradientDrawable g = new GradientDrawable();
+                  g.setColor(fill);
+                  g.setCornerRadius(u(1.0));
+                  g.setStroke(Math.max(2, u(0.12)), stroke);
+                  return g;
+              }
+
+              private Drawable bg() {
+                  StateListDrawable s = new StateListDrawable();
+                  s.addState(new int[]{android.R.attr.state_focused}, shape(0xFF2B3A67, 0xFF7C9CFF));
+                  s.addState(new int[]{}, shape(0xFF151A26, 0xFF232A3B));
+                  return s;
+              }
+
+              private void focusFx(View v) {
+                  v.setOnFocusChangeListener((view, has) ->
+                          view.animate().scaleX(has ? 1.08f : 1f).scaleY(has ? 1.08f : 1f).setDuration(120).start());
+              }
+
+              private LinearLayout.LayoutParams buttonParams() {
+                  LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(u(15), u(4.2));
+                  lp.setMargins(u(1.0), 0, u(1.0), 0);
+                  return lp;
+              }
+
+              // ---------- главный экран ----------
+
+              private View makeTile(final int i) {
+                  LinearLayout t = new LinearLayout(this);
+                  t.setOrientation(LinearLayout.VERTICAL);
+                  t.setGravity(Gravity.CENTER);
+                  t.setPadding(u(0.8), u(0.8), u(0.8), u(0.8));
+                  t.setBackground(bg());
+                  t.setFocusable(true);
+                  t.setClickable(true);
+                  focusFx(t);
+
+                  ImageView iv = new ImageView(this);
+                  iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
+                  t.addView(iv, new LinearLayout.LayoutParams(u(7), u(7)));
+
+                  TextView title = text(TITLES[i], 1.5, 0xFFE8EAF0);
+                  title.setGravity(Gravity.CENTER);
+                  LinearLayout.LayoutParams tl = new LinearLayout.LayoutParams(-2, -2);
+                  tl.topMargin = u(1.0);
+                  t.addView(title, tl);
+
+                  TextView hint = text("", 0.9, 0xFF8A93A8);
+                  hint.setGravity(Gravity.CENTER);
+                  t.addView(hint, new LinearLayout.LayoutParams(-2, -2));
+
+                  t.setOnClickListener(v -> openSlot(i));
+                  t.setOnLongClickListener(v -> {
+                      showGrid(i);
+                      return true;
+                  });
+
+                  icons[i] = iv;
+                  hints[i] = hint;
+                  tiles[i] = t;
+                  return t;
+              }
+
+              private View makeButton(String label, View.OnClickListener click) {
+                  TextView b = text(label, 1.4, 0xFFE8EAF0);
+                  b.setGravity(Gravity.CENTER);
+                  b.setBackground(bg());
+                  b.setFocusable(true);
+                  b.setClickable(true);
+                  b.setOnClickListener(click);
+                  focusFx(b);
+                  return b;
+              }
+
+              private void refreshTiles() {
+                  for (int i = 0; i < 3; i++) {
+                      App a = resolve(i);
+                      icons[i].setImageDrawable(a == null ? null : iconOf(a));
+                      hints[i].setText(a == null ? "Не найдено. Нажмите OK" : "");
+                      hints[i].setVisibility(a == null ? View.VISIBLE : View.GONE);
+                  }
+              }
+
+              // ---------- приложения ----------
+
+              private void loadApps() {
+                  apps.clear();
+                  Set<String> seen = new HashSet<>();
+                  String[] cats = {Intent.CATEGORY_LEANBACK_LAUNCHER, Intent.CATEGORY_LAUNCHER};
+                  for (String c : cats) {
+                      Intent i = new Intent(Intent.ACTION_MAIN);
+                      i.addCategory(c);
+                      for (ResolveInfo r : pm.queryIntentActivities(i, 0)) {
+                          String p = r.activityInfo.packageName;
+                          if (p.equals(getPackageName()) || !seen.add(p)) continue;
+                          App a = new App();
+                          a.pkg = p;
+                          a.cls = r.activityInfo.name;
+                          a.label = String.valueOf(r.loadLabel(pm));
+                          a.ri = r;
+                          apps.add(a);
+                      }
+                  }
+                  Collections.sort(apps, (x, y) -> x.label.compareToIgnoreCase(y.label));
+              }
+
+              private Drawable iconOf(App a) {
+                  if (a.icon == null) a.icon = a.ri.loadIcon(pm);
+                  return a.icon;
+              }
+
+              private App byPkg(String pkg) {
+                  for (App a : apps) {
+                      if (a.pkg.equals(pkg)) return a;
+                  }
+                  return null;
+              }
+
+              private App resolve(int idx) {
+                  String saved = prefs.getString(KEYS[idx], null);
+                  if (saved != null) {
+                      App a = byPkg(saved);
+                      if (a != null) return a;
+                  }
+                  for (String p : PKGS[idx]) {
+                      App a = byPkg(p);
+                      if (a != null) return a;
+                  }
+                  for (App a : apps) {
+                      String l = a.label.toLowerCase(Locale.ROOT);
+                      String p = a.pkg.toLowerCase(Locale.ROOT);
+                      for (String w : WORDS[idx]) {
+                          if (l.contains(w) || p.contains(w)) return a;
+                      }
+                  }
+                  return null;
+              }
+
+              private void openSlot(int idx) {
+                  App a = resolve(idx);
+                  if (a == null) {
+                      showGrid(idx);
+                  } else {
+                      launch(a);
+                  }
+              }
+
+              private void launch(App a) {
+                  try {
+                      Intent i = new Intent(Intent.ACTION_MAIN);
+                      i.setClassName(a.pkg, a.cls);
+                      i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
+                      startActivity(i);
+                  } catch (Exception e) {
+                      toast("Не удалось открыть " + a.label);
+                  }
+              }
+
+              // ---------- список всех приложений ----------
+
+              private void buildOverlay() {
+                  overlay = new FrameLayout(this);
+                  overlay.setBackgroundColor(0xF20B0D12);
+                  overlay.setVisibility(View.GONE);
+
+                  LinearLayout col = new LinearLayout(this);
+                  col.setOrientation(LinearLayout.VERTICAL);
+                  col.setPadding(u(5), u(3), u(5), u(2));
+
+                  gridTitle = text("", 2.0, 0xFFE8EAF0);
+                  col.addView(gridTitle, new LinearLayout.LayoutParams(-1, -2));
+
+                  grid = new GridView(this);
+                  grid.setNumColumns(6);
+                  grid.setStretchMode(GridView.STRETCH_COLUMN_WIDTH);
+                  grid.setVerticalSpacing(u(1));
+                  grid.setHorizontalSpacing(u(1));
+                  grid.setSelector(shape(0x552B3A67, 0xFF7C9CFF));
+                  grid.setPadding(0, u(2), 0, 0);
+                  grid.setClipToPadding(false);
+
+                  adapter = new BaseAdapter() {
+                      @Override
+                      public int getCount() {
+                          return apps.size();
+                      }
+
+                      @Override
+                      public Object getItem(int pos) {
+                          return apps.get(pos);
+                      }
+
+                      @Override
+                      public long getItemId(int pos) {
+                          return pos;
+                      }
+
+                      @Override
+                      public View getView(int pos, View cv, ViewGroup parent) {
+                          if (cv == null) {
+                              LinearLayout item = new LinearLayout(MainActivity.this);
+                              item.setOrientation(LinearLayout.VERTICAL);
+                              item.setGravity(Gravity.CENTER);
+                              item.setPadding(u(0.8), u(1.2), u(0.8), u(1.2));
+                              ImageView iv = new ImageView(MainActivity.this);
+                              item.addView(iv, new LinearLayout.LayoutParams(u(4.5), u(4.5)));
+                              TextView tv = text("", 1.1, 0xFFE8EAF0);
+                              tv.setSingleLine(true);
+                              tv.setEllipsize(TextUtils.TruncateAt.END);
+                              tv.setGravity(Gravity.CENTER);
+                              LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+                              lp.topMargin = u(0.6);
+                              item.addView(tv, lp);
+                              item.setTag(new View[]{iv, tv});
+                              cv = item;
+                          }
+                          View[] h = (View[]) cv.getTag();
+                          App a = apps.get(pos);
+                          ((ImageView) h[0]).setImageDrawable(iconOf(a));
+                          ((TextView) h[1]).setText(a.label);
+                          return cv;
+                      }
+                  };
+                  grid.setAdapter(adapter);
+                  grid.setOnItemClickListener((p, v, pos, id) -> onAppChosen(apps.get(pos)));
+                  col.addView(grid, new LinearLayout.LayoutParams(-1, 0, 1f));
+
+                  overlay.addView(col, new FrameLayout.LayoutParams(-1, -1));
+                  root.addView(overlay, new FrameLayout.LayoutParams(-1, -1));
+              }
+
+              private void showGrid(int idx) {
+                  assignIdx = idx;
+                  loadApps();
+                  if (overlay == null) buildOverlay();
+                  gridTitle.setText(idx < 0 ? "Все приложения" : "Выберите приложение для «" + TITLES[idx] + "»");
+                  adapter.notifyDataSetChanged();
+                  main.setVisibility(View.GONE);
+                  overlay.setVisibility(View.VISIBLE);
+                  grid.setSelection(0);
+                  grid.requestFocus();
+              }
+
+              private void hideGrid() {
+                  if (overlay != null && overlay.getVisibility() == View.VISIBLE) {
+                      overlay.setVisibility(View.GONE);
+                      main.setVisibility(View.VISIBLE);
+                      tiles[0].requestFocus();
+                  }
+              }
+
+              private void onAppChosen(App a) {
+                  if (assignIdx >= 0) {
+                      prefs.edit().putString(KEYS[assignIdx], a.pkg).apply();
+                      hideGrid();
+                      refreshTiles();
+                  } else {
+                      launch(a);
+                  }
+              }
+
+              // ---------- HDMI ----------
+
+              private void openHdmi() {
+                  try {
+                      TvInputManager tm = (TvInputManager) getSystemService(Context.TV_INPUT_SERVICE);
+                      final List<TvInputInfo> list = new ArrayList<>();
+                      for (TvInputInfo info : tm.getTvInputList()) {
+                          if (info.isPassthroughInput()) list.add(info);
+                      }
+                      if (list.isEmpty()) {
+                          toast("Входы не найдены. Нажмите INPUT на пульте");
+                          return;
+                      }
+                      if (list.size() == 1) {
+                          openInput(list.get(0));
+                          return;
+                      }
+                      String[] names = new String[list.size()];
+                      for (int i = 0; i < names.length; i++) {
+                          CharSequence l = list.get(i).loadLabel(this);
+                          names[i] = l != null ? l.toString() : list.get(i).getId();
+                      }
+                      new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog)
+                              .setTitle("Источник сигнала")
+                              .setItems(names, (d, which) -> openInput(list.get(which)))
+                              .show();
+                  } catch (Exception e) {
+                      toast("Не удалось получить список входов. Нажмите INPUT на пульте");
+                  }
+              }
+
+              private void openInput(TvInputInfo info) {
+                  try {
+                      Intent i = new Intent(Intent.ACTION_VIEW,
+                              TvContract.buildChannelUriForPassthroughInput(info.getId()));
+                      i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                      startActivity(i);
+                  } catch (Exception e) {
+                      toast("Не удалось переключить вход. Нажмите INPUT на пульте");
+                  }
+              }
+
+              private void toast(String s) {
+                  Toast.makeText(this, s, Toast.LENGTH_LONG).show();
+              }
+          }
+          ZL_EOF
+
+      - name: Build APK
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - name: Rename APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk ZoneLauncher.apk
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Zone Launcher
+          files: ZoneLauncher.apk
+          make_latest: true
